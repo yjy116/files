@@ -5,6 +5,8 @@ CONTROL_FIFO="/tmp/control_rtl9303.fifo"
 SPI_SOURCE="/dev/spidev1.0"
 SPI_ALIAS="/dev/spidev32765.0"
 USR_APP="/lib/rtl/usrApp"
+LAN_IFACE="lan"
+BRIDGE_IFACE="br-lan"
 
 log_msg() {
 	logger -t "$TAG" "$*"
@@ -34,6 +36,48 @@ link_library() {
 prepare_libraries() {
 	link_library "/lib/libubus.so.*" "/lib/libubus.so" || return 1
 	link_library "/lib/libubox.so.*" "/lib/libubox.so" || return 1
+}
+
+is_valid_mac() {
+	echo "$1" | grep -Eq '^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$'
+}
+
+get_iface_mac() {
+	local iface="$1"
+	local mac_path="/sys/class/net/$iface/address"
+
+	[ -r "$mac_path" ] || return 1
+	cat "$mac_path"
+}
+
+sync_lan_mac() {
+	local target_mac
+	local current_mac
+
+	target_mac="$(get_iface_mac "$BRIDGE_IFACE")" || {
+		log_msg "ERROR: cannot read $BRIDGE_IFACE MAC"
+		return 1
+	}
+
+	if ! is_valid_mac "$target_mac"; then
+		log_msg "ERROR: invalid $BRIDGE_IFACE MAC $target_mac"
+		return 1
+	fi
+
+	current_mac="$(get_iface_mac "$LAN_IFACE")" || {
+		log_msg "ERROR: cannot read $LAN_IFACE MAC"
+		return 1
+	}
+
+	if [ "$current_mac" = "$target_mac" ]; then
+		log_msg "$LAN_IFACE MAC already matches $BRIDGE_IFACE: $target_mac"
+		return 0
+	fi
+
+	log_msg "setting $LAN_IFACE MAC from $current_mac to $target_mac"
+	ip link set dev "$LAN_IFACE" down || return 1
+	ip link set dev "$LAN_IFACE" address "$target_mac" || return 1
+	ip link set dev "$LAN_IFACE" up || return 1
 }
 
 prepare_spi_device() {
@@ -81,6 +125,7 @@ run_usrapp() {
 
 log_msg "initializing RTL9303 switch helper"
 prepare_libraries || exit 1
+sync_lan_mac || exit 1
 prepare_spi_device || exit 1
 prepare_fifo || exit 1
 run_usrapp

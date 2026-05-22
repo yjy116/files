@@ -1,0 +1,28 @@
+#!/bin/ash
+
+TAG="exec-dir"
+DIR_PATH="$1"
+EXIT_STATUS=0
+
+logger -t "$TAG" "running $DIR_PATH with PORT=${PORT:-unset} STATUS=${STATUS:-unset}"
+
+if [ -z "$DIR_PATH" ]; then
+	logger -t "$TAG" "ERROR: missing directory argument"
+	exit 1
+fi
+
+if [ ! -d "$DIR_PATH" ]; then
+	logger -t "$TAG" "ERROR: directory not found: $DIR_PATH"
+	exit 1
+fi
+
+for script in "$DIR_PATH"/*; do
+	[ -f "$script" ] || continue
+	[ -x "$script" ] || continue
+	if ! "$script"; then
+		logger -t "$TAG" "ERROR: $script failed"
+		EXIT_STATUS=1
+	fi
+done
+
+exit "$EXIT_STATUS"

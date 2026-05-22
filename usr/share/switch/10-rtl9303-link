@@ -1,0 +1,25 @@
+#!/bin/ash
+
+TAG="rtl9303-link"
+LAN_IFACE="lan"
+
+logger -t "$TAG" "PORT=${PORT:-unset} STATUS=${STATUS:-unset}"
+
+case "$STATUS" in
+	1)
+		ip link set dev "$LAN_IFACE" up || {
+			logger -t "$TAG" "ERROR: failed to bring $LAN_IFACE up"
+			exit 1
+		}
+		ubus call network.interface.lan up >/dev/null 2>&1 || {
+			logger -t "$TAG" "ERROR: failed to notify netifd lan up"
+			exit 1
+		}
+		;;
+	0)
+		;;
+	*)
+		logger -t "$TAG" "ERROR: unexpected STATUS=${STATUS:-unset}"
+		exit 1
+		;;
+esac
