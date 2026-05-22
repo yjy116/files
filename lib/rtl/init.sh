@@ -7,6 +7,7 @@ SPI_ALIAS="/dev/spidev32765.0"
 USR_APP="/lib/rtl/usrApp"
 LAN_IFACE="lan"
 BRIDGE_IFACE="br-lan"
+IFACE_WAIT_SECONDS=30
 
 log_msg() {
 	logger -t "$TAG" "$*"
@@ -50,9 +51,32 @@ get_iface_mac() {
 	cat "$mac_path"
 }
 
+wait_for_iface() {
+	local iface="$1"
+	local elapsed=0
+
+	while [ "$elapsed" -lt "$IFACE_WAIT_SECONDS" ]; do
+		[ -r "/sys/class/net/$iface/address" ] && return 0
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+
+	return 1
+}
+
 sync_lan_mac() {
 	local target_mac
 	local current_mac
+
+	if ! wait_for_iface "$BRIDGE_IFACE"; then
+		log_msg "WARN: $BRIDGE_IFACE is not ready, skipping LAN MAC sync"
+		return 0
+	fi
+
+	if ! wait_for_iface "$LAN_IFACE"; then
+		log_msg "WARN: $LAN_IFACE is not ready, skipping LAN MAC sync"
+		return 0
+	fi
 
 	target_mac="$(get_iface_mac "$BRIDGE_IFACE")" || {
 		log_msg "ERROR: cannot read $BRIDGE_IFACE MAC"
