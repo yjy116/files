@@ -1,0 +1,6 @@
+*.sh text eol=lf
+etc/rc.local text eol=lf
+lib/rtl/usrApp binary
+lib/aqr/aq-fw-download binary
+lib/aqr/aqr-v5.6.7.cld binary
+lib/mmc/data_key binary
