@@ -8,6 +8,9 @@ USR_APP="/lib/rtl/usrApp"
 LAN_IFACE="lan"
 BRIDGE_IFACE="br-lan"
 IFACE_WAIT_SECONDS=30
+USRAPP_START_DELAY_SECONDS=2
+SWITCH_CPU_PORT=27
+SWITCH_LAN_PORTS="8 20 24 25 27"
 
 log_msg() {
 	logger -t "$TAG" "$*"
@@ -64,7 +67,7 @@ wait_for_iface() {
 	return 1
 }
 
-sync_lan_mac() {
+verify_lan_mac() {
 	local target_mac
 	local current_mac
 
@@ -93,15 +96,9 @@ sync_lan_mac() {
 		return 1
 	}
 
-	if [ "$current_mac" = "$target_mac" ]; then
-		log_msg "$LAN_IFACE MAC already matches $BRIDGE_IFACE: $target_mac"
-		return 0
-	fi
-
-	log_msg "setting $LAN_IFACE MAC from $current_mac to $target_mac"
-	ip link set dev "$LAN_IFACE" down || return 1
-	ip link set dev "$LAN_IFACE" address "$target_mac" || return 1
-	ip link set dev "$LAN_IFACE" up || return 1
+	[ "$current_mac" = "$target_mac" ] || {
+		log_msg "WARN: $LAN_IFACE MAC $current_mac differs from $BRIDGE_IFACE $target_mac"
+	}
 }
 
 prepare_spi_device() {
@@ -128,18 +125,105 @@ prepare_fifo() {
 	log_msg "control fifo ready at $CONTROL_FIFO"
 }
 
-run_usrapp() {
-	local app_pid
-	local status
-
+start_usrapp() {
 	if [ ! -x "$USR_APP" ]; then
 		log_msg "ERROR: missing executable $USR_APP"
 		return 1
 	fi
 
-	log_msg "starting usrApp and keeping it alive for LAN hotplug"
+	log_msg "starting usrApp for RTL9303 switch programming"
 	( tail -f "$CONTROL_FIFO" | "$USR_APP" ) 2>&1 | logger -t "$TAG" &
-	app_pid="$!"
+	APP_PID="$!"
+
+	sleep "$USRAPP_START_DELAY_SECONDS"
+}
+
+send_diag() {
+	local command="$1"
+
+	log_msg "diag: $command"
+	printf '%s\n' "$command" > "$CONTROL_FIFO"
+}
+
+get_switch_mac() {
+	local mac
+
+	wait_for_iface "$BRIDGE_IFACE" || return 1
+	mac="$(get_iface_mac "$BRIDGE_IFACE")" || return 1
+	is_valid_mac "$mac" || return 1
+	printf '%s\n' "$mac"
+}
+
+configure_l2_entries() {
+	local mac="$1"
+	local vid
+
+	for vid in 1 10 20 30; do
+		send_diag "l2-table add mac-ucast $vid $mac port $SWITCH_CPU_PORT"
+		send_diag "l2-table set mac-ucast $vid $mac port $SWITCH_CPU_PORT static"
+	done
+
+	send_diag "l2-table set port-move sttc-port-move learn state enable"
+	send_diag "l2-table set port-move sttc-port-move action drop"
+}
+
+configure_vlans() {
+	local vid
+
+	send_diag "vlan create vlan-table vid 0"
+	send_diag "vlan set vlan-table vid 0 member all"
+	send_diag "vlan set vlan-table vid 0 untag-port $SWITCH_CPU_PORT"
+
+	send_diag "vlan create vlan-table vid 1"
+	send_diag "vlan set vlan-table vid 1 member all"
+	send_diag "vlan set vlan-table vid 1 untag-port all"
+	send_diag "vlan set pvid inner port all 1"
+	send_diag "vlan set pvid-mode inner port all untag-only"
+
+	for vid in 10 20 30; do
+		send_diag "vlan create vlan-table vid $vid"
+		send_diag "vlan set vlan-table vid $vid member all"
+	done
+}
+
+configure_eee() {
+	local port
+
+	for port in $SWITCH_LAN_PORTS; do
+		send_diag "eee set port $port state enable"
+	done
+}
+
+configure_leds() {
+	send_diag "port set phy-mmd-reg port 8 mmd-addr 0x1E mmd-reg 0xc430 data 0xC0C0"
+	send_diag "port set phy-mmd-reg port 8 mmd-addr 0x1E mmd-reg 0xc431 data 0x20"
+	send_diag "port set phy-mmd-reg port 20 mmd-addr 0x1F mmd-reg 0xd032 data 0x24"
+	send_diag "port set phy-mmd-reg port 20 mmd-addr 0x1F mmd-reg 0xd034 data 0x3"
+	send_diag "port set phy-mmd-reg port 24 mmd-addr 0x1F mmd-reg 0xd032 data 0x24"
+	send_diag "port set phy-mmd-reg port 24 mmd-addr 0x1F mmd-reg 0xd034 data 0x3"
+}
+
+configure_switch() {
+	local mac
+
+	mac="$(get_switch_mac)" || {
+		log_msg "ERROR: cannot get $BRIDGE_IFACE MAC for RTL9303 L2 table"
+		return 1
+	}
+
+	log_msg "programming RTL9303 switch with CPU port $SWITCH_CPU_PORT and MAC $mac"
+	send_diag "port set port all state disable"
+	send_diag "l2-table del all"
+	configure_vlans
+	configure_l2_entries "$mac"
+	configure_eee
+	send_diag "port set port all state enable"
+	configure_leds
+}
+
+wait_usrapp() {
+	local app_pid="$1"
+	local status
 
 	wait "$app_pid"
 	status="$?"
@@ -149,7 +233,9 @@ run_usrapp() {
 
 log_msg "initializing RTL9303 switch helper"
 prepare_libraries || exit 1
-sync_lan_mac || exit 1
+verify_lan_mac || exit 1
 prepare_spi_device || exit 1
 prepare_fifo || exit 1
-run_usrapp
+start_usrapp || exit 1
+configure_switch || exit 1
+wait_usrapp "$APP_PID"
